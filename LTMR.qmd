@@ -1,6 +1,6 @@
 ---
 title: "LTMR Analysis Report"
-format: pdf
+format: html
 editor: visual
 ---
 
