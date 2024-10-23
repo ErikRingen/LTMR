@@ -1,0 +1,532 @@
+---
+title: "LTMR Analysis Report"
+format: pdf
+editor: visual
+---
+
+```{r, message = F, warning = F}
+library(tidyverse)
+library(GGally)
+library(brms)
+library(psych)
+library(patchwork)
+library(bayestestR)
+library(tidybayes)
+library(modelr)
+library(ggdist)
+library(grid)
+library(bayesplot)
+```
+
+## Data processing
+
+First, I recode and restructure the raw data for further exploration and analysis.
+
+```{r, message = F, warning=F}
+d_raw <- readxl::read_xlsx("raw_data/LTMR Coded data1.xlsx")[-1]
+
+# Clean the names of variables
+names(d_raw)[1:8] <- c(
+  "pid",
+  "age",
+  "sex",
+  "edu",
+  "religious_affiliation",
+  "marital_status",
+  "occupation",
+  "rel_deceased")
+
+# AL102 appears twice in the dataset, I am arbitrarily selecting one here but need to follow up on this
+d_raw <- d_raw %>% 
+  group_by(pid) %>% 
+  slice(1) %>% 
+  ungroup()
+
+# Separate responses to different instruments, pivot long with respect to item
+
+## ritual questions
+d_rituals <- d_raw %>% 
+  select( starts_with( c("pid", "Pre Burial", "Rituals", "Post Burial")) ) %>% 
+  pivot_longer(-pid, names_to = "item", values_to = "response") %>% 
+  mutate(
+    # recode so that 1 = never, 2 = closely witnessed, 3 = participated
+    response = case_when(
+    response == 0 ~ 1,
+    response == 1 ~ 2,
+    response == 2 ~ 3
+  ),
+    # separate questions by pre/during/post burial
+    subscale = case_when(
+      str_starts(item, "Pre") ~ "pre",
+      str_starts(item, "Rituals") ~ "during",
+      str_starts(item, "Post") ~ "post"
+    ),
+    # remove the prefix for items now that we have recorded subscale in a separate column
+    item = sub(".*?-", "", item),
+    item = sub("deceasedâ€™s", "deceased's", item),
+    # remove leading white spaces
+    item = trimws(item)
+  )
+
+## prosociality scale
+d_prosoc <- d_raw %>% 
+  select( starts_with(c("pid", "Indicate")) ) %>% 
+  pivot_longer(-pid, names_to = "item", values_to = "response") %>% 
+  mutate(
+    # remove the prefix for items now that we have recorded subscale in a separate column
+    item = sub(".*?-", "", item),
+    # remove leading white spaces
+    item = trimws(item),
+    item_number = match(item, unique(item))
+  )
+
+## subjective wellbeing scale
+d_SWB <- d_raw %>% 
+  select( starts_with(c("pid", "The following")) ) %>% 
+  pivot_longer(-pid, names_to = "item", values_to = "response") %>% 
+  mutate(
+    # remove the prefix for items now that we have recorded subscale in a separate column
+    item = sub(".*?-", "", item),
+    # remove leading white spaces
+    item = trimws(item),
+    item_number = match(item, unique(item))
+  )
+
+# Participant demographics
+d_demographics <- d_raw %>% 
+  select(pid, age, sex, edu, religious_affiliation, marital_status, occupation, rel_deceased)
+
+# Now, export these tables for further analysis
+write_csv(d_demographics, "data/demographics.csv")
+write_csv(d_rituals, "data/mourning_rituals.csv")
+write_csv(d_prosoc, "data/prosociality.csv")
+write_csv(d_SWB, "data/subjective_wellbeing.csv")
+```
+
+## Data visualization
+
+### Data visualization: participation in rituals
+
+```{r, message = F, warning=F}
+## Rituals data viz
+d_ritual <- read.csv("data/mourning_rituals.csv") %>% 
+  mutate(label = factor(response, labels = c("never", "closely witnessed", "participated"))) %>% 
+  mutate(subscale = factor(subscale, levels = c("pre", "during", "post"), labels = c("pre burial", "during burial", "post burial")))
+
+d_ritual %>% 
+  ggplot(aes(x = fct_reorder(item, response, .fun = mean), fill = fct_rev(label))) + 
+  geom_bar() +
+  scale_fill_manual(values= rev(c("#440145FF", "#238A8DFF", "#55C667FF"))) + 
+  facet_grid(subscale ~., scales = "free_y") +
+  coord_flip() +
+  theme_minimal() +
+  theme( strip.background = element_blank(), legend.position = c(-1.1, 0.85), legend.title = element_blank()) +
+  xlab("") +
+  ylab("count")
+
+# Compute summary statistics
+d_ritual_summary <- d_ritual %>% 
+  group_by(item) %>% 
+  summarise(mean = mean(response), subscale = unique(subscale)) 
+
+# Compute summary statistics, for participants
+d_ritual_summary_pid <- d_ritual %>% 
+  group_by(pid, subscale) %>% 
+  summarise(sum_score = sum(response)) 
+
+ggplot(d_ritual_summary, aes(x = fct_reorder(item, mean), y = mean)) + 
+  facet_grid(subscale ~., scales = "free_y") +
+  geom_point() + 
+  coord_flip() + 
+  scale_y_continuous(limits = c(1, 3)) +
+  theme_minimal() +
+  xlab("")
+
+
+d_ritual_summary_pid %>% 
+  pivot_wider(names_from = subscale, values_from = sum_score) %>% ggpairs(columns = 2:4) + 
+  theme_minimal() +
+  xlab("sum score") +
+  ylab("sum score") +
+  theme(panel.spacing = unit(2, "lines"))
+
+```
+
+### Data visualization: prosociality
+
+```{r, message = F, warning=F}
+
+## Prosociality data viz
+d_prosoc <- read.csv("data/prosociality.csv") %>% 
+  mutate(
+  label = factor(response, labels = c("Never/Almost Never", "Rarely", "Occasionally", "Often", "Always/Almost Always")),
+  subscale = ifelse(item_number %in% c(5, 8, 12, 16), "prosocial feelings", "prosocial actions")
+  )
+
+# Compute summary statistics
+d_prosoc_summary <- d_prosoc %>% 
+  group_by(item) %>% 
+  summarise(mean = mean(response, na.rm = T), subscale = unique(subscale)) 
+
+# Compute summary statistics, for participants
+d_prosoc_summary_pid <- d_prosoc %>% 
+  group_by(pid, subscale) %>% 
+  summarise(sum_score = sum(response)) 
+
+d_prosoc %>% 
+  filter(!is.na(response)) %>% 
+  ggplot(aes(x = fct_reorder(item, response, .fun = mean), fill = fct_rev(label))) + 
+  geom_bar() +
+  scale_fill_manual(values= rev(c("#440145FF", "#404788FF", "#238A8DFF", "#55C667FF", "#FDE725FF"))) + 
+  facet_grid(subscale ~., scales = "free_y") +
+  coord_flip() +
+  theme_minimal() +
+  theme( strip.background = element_blank(), legend.position = c(-4, 0.85), legend.title = element_blank()) +
+  xlab("") +
+  ylab("count")
+
+ggplot(d_prosoc_summary, aes(x = fct_reorder(item, mean), y = mean)) + 
+  facet_grid(subscale ~., scales = "free_y") +
+  geom_point() + 
+  coord_flip() + 
+  theme_minimal() +
+  xlab("")
+
+d_prosoc_summary_pid %>% 
+  pivot_wider(names_from = subscale, values_from = sum_score) %>% ggpairs(columns = 2:3) + 
+  theme_minimal() +
+  xlab("sum score") +
+  ylab("sum score") +
+  theme(panel.spacing = unit(2, "lines"))
+```
+
+### Data visualization: subjective well-being
+
+```{r, message = F, warning=F}
+d_SWB <- read.csv("data/subjective_wellbeing.csv") %>% 
+  mutate(
+  label = factor(response, labels = c("Strongly Disagree", "Disagree", "Neutral", "Agree", "Strongly Agree")),
+  subscale = case_when(
+    item_number %in% 5:16 ~ "psychological well-being",
+    item_number %in% c(1, 2, 3, 22, 23, 4) ~ "physical health and well-being",
+    item_number %in% 17:21 ~ "relationships"
+  )
+  )
+
+# Compute summary statistics
+d_SWB_summary <- d_SWB %>% 
+  group_by(item) %>% 
+  summarise(mean = mean(response, na.rm = T), subscale = unique(subscale)) 
+
+# Compute summary statistics, for participants
+d_SWB_summary_pid <- d_SWB %>% 
+  group_by(pid, subscale) %>% 
+  summarise(sum_score = sum(response)) 
+
+d_SWB %>% 
+  filter(!is.na(response)) %>% 
+  ggplot(aes(x = fct_reorder(item, response, .fun = mean), fill = fct_rev(label))) + 
+  geom_bar() +
+  scale_fill_manual(values= rev(c("#440145FF", "#404788FF", "#238A8DFF", "#55C667FF", "#FDE725FF"))) + 
+  facet_grid(subscale ~., scales = "free_y") +
+  coord_flip() +
+  theme_minimal() +
+  theme( strip.background = element_blank(), legend.position = c(-4, 0.85), legend.title = element_blank()) +
+  xlab("") +
+  ylab("count")
+
+ggplot(d_SWB_summary, aes(x = fct_reorder(item, mean), y = mean)) + 
+  facet_grid(subscale ~., scales = "free_y") +
+  geom_point() + 
+  coord_flip() + 
+  theme_minimal() +
+  xlab("")
+
+d_SWB_summary_pid %>% 
+  pivot_wider(names_from = subscale, values_from = sum_score) %>% ggpairs(columns = 2:3) + 
+  theme_minimal() +
+  xlab("sum score") +
+  ylab("sum score") +
+  theme(panel.spacing = unit(2, "lines"))
+```
+
+## Assessing reliability of instruments
+
+I will assess the reliability (in the classical testing theory sense) of the instruments. Reliability is a influenced by both the dimensionality of an instrument (the extent to which all items measure the same underlying construct) and the measurement error (noisiness in responses). I'll start by using a simple method (Cronbach's alpha), which is easy to calculate but makes strong assumptions. Later we can calculate reliability again using a more robust, model-based framework.
+
+### Rituals
+
+```{r, message = F, warning = F}
+alpha_rituals <- d_ritual %>% 
+  pivot_wider(id_cols = pid, names_from = item, values_from = response) %>% 
+  select(-pid) %>% 
+  alpha()
+
+print(paste("standardized Cronbach's alpha for rituals =", round(alpha_rituals$total[2], 2)))
+
+alpha_rituals_pre <- d_ritual %>% 
+  filter(subscale == "pre burial") %>% 
+  pivot_wider(id_cols = pid, names_from = item, values_from = response) %>% 
+  select(-pid) %>% 
+  alpha()
+
+print(paste("standardized Cronbach's alpha for pre-burial rituals =", round(alpha_rituals_pre$total[2], 2)))
+
+alpha_rituals_during <- d_ritual %>% 
+  filter(subscale == "during burial") %>% 
+  pivot_wider(id_cols = pid, names_from = item, values_from = response) %>% 
+  select(-pid) %>% 
+  alpha()
+
+print(paste("standardized Cronbach's alpha for rituals during burial =", round(alpha_rituals_during$total[2], 2)))
+
+alpha_rituals_post <- d_ritual %>% 
+  filter(subscale == "post burial") %>% 
+  pivot_wider(id_cols = pid, names_from = item, values_from = response) %>% 
+  select(-pid) %>% 
+  alpha()
+
+print(paste("standardized Cronbach's alpha for post-burial rituals =", round(alpha_rituals_post$total[2], 2)))
+```
+
+### Prosociality
+
+```{r, message = F, warning = F}
+### Prosociality
+alpha_prosoc <- d_prosoc %>% 
+  pivot_wider(id_cols = pid, names_from = item, values_from = response) %>% 
+  select(-pid) %>% 
+  alpha()
+
+print(paste("standardized Cronbach's alpha for prosociality scale =", round(alpha_prosoc$total[2], 2)))
+
+alpha_prosoc_actions <- d_prosoc %>% 
+  filter(subscale == "prosocial actions") %>% 
+  pivot_wider(id_cols = pid, names_from = item, values_from = response) %>% 
+  select(-pid) %>% 
+  alpha()
+
+print(paste("standardized Cronbach's alpha for prosocial actions subscale =", round(alpha_prosoc_actions$total[2], 2)))
+
+alpha_prosoc_feelings <- d_prosoc %>% 
+  filter(subscale == "prosocial feelings") %>% 
+  pivot_wider(id_cols = pid, names_from = item, values_from = response) %>% 
+  select(-pid) %>% 
+  alpha()
+
+print(paste("standardized Cronbach's alpha for prosocial feelings subscale =", round(alpha_prosoc_feelings$total[2], 2)))
+
+```
+
+### Subjective well-being
+
+```{r, message = F, warning = F}
+alpha_SWB <- d_SWB %>% 
+  pivot_wider(id_cols = pid, names_from = item, values_from = response) %>% 
+  select(-pid) %>% 
+  alpha()
+
+print(paste("standardized Cronbach's alpha for subjective well-being scale =", round(alpha_SWB$total[2], 2)))
+
+alpha_SWB_phys <- d_SWB %>% 
+  filter(subscale == "physical health and well-being") %>% 
+  pivot_wider(id_cols = pid, names_from = item, values_from = response) %>% 
+  select(-pid) %>% 
+  alpha()
+
+print(paste("standardized Cronbach's alpha for physical well-being subscale =", round(alpha_SWB_phys$total[2], 2)))
+
+alpha_SWB_psych <- d_SWB %>% 
+  filter(subscale == "psychological well-being") %>% 
+  pivot_wider(id_cols = pid, names_from = item, values_from = response) %>% 
+  select(-pid) %>% 
+  alpha()
+
+print(paste("standardized Cronbach's alpha for psychological well-being subscale =", round(alpha_SWB_psych$total[2], 2)))
+
+alpha_SWB_rel <- d_SWB %>% 
+  filter(subscale == "relationships") %>% 
+  pivot_wider(id_cols = pid, names_from = item, values_from = response) %>% 
+  select(-pid) %>% 
+  alpha()
+
+print(paste("standardized Cronbach's alpha for relationships subscale =", round(alpha_SWB_rel$total[2], 2)))
+```
+
+## Testing hypotheses
+
+Preregistered hypotheses: https://osf.io/wsycu
+
+```{r, message = F, warning = F}
+# Get overall summary scores for all scales
+d_ritual_summary_pid2 <- d_ritual_summary_pid %>% 
+  group_by(pid) %>% 
+  summarise(ritual_sum_score = sum(sum_score)) 
+
+d_prosoc_summary_pid2 <- d_prosoc_summary_pid %>% 
+  group_by(pid) %>% 
+  summarise(prosoc_sum_score = sum(sum_score)) 
+
+d_SWB_summary_pid2 <- d_SWB_summary_pid %>% 
+  group_by(pid) %>% 
+  summarise(SWB_sum_score = sum(sum_score))
+  
+# Join dataframes
+d_summary_pid <- left_join(d_ritual_summary_pid2, d_prosoc_summary_pid2) %>%
+   left_join(d_SWB_summary_pid2) |> 
+   mutate(
+    prosoc_z = as.numeric(scale(prosoc_sum_score)),
+    ritual_z = as.numeric(scale(ritual_sum_score)),
+    SWB_z = as.numeric(scale(SWB_sum_score))
+   )
+
+```
+
+### Hypothesis 1: Participation in mourning rituals boosts cooperation (Prosociality scale)
+
+H1a: If participation in mourning rituals boosts cooperation, then mean prosociality scores will be higher for individuals who have participated in a traditional Luhya mourning ritual
+
+```{r, warning = F, message = F}
+# First, prior predictive checks
+priors <- prior(normal(0, 0.5), class = "Intercept") + prior(normal(0, 0.5), class = "b") + prior(normal(0, 1), class = "sigma") + prior(normal(0, 2), class = "alpha")
+
+m_h1_prior <- brm(prosoc_z ~ ritual_z, data = d_summary_pid, family = skew_normal(), prior = priors, chains = 1, iter = 1000, sample_prior = "only")
+
+set.seed(123)
+color_scheme_set("red")
+p1 <- pp_check(m_h1_prior, ndraws = 100) + ggtitle("Prior predictive checks")
+p2 <- pp_check(m_h1_prior, ndraws = 100, type = "ecdf_overlay")
+
+(p1 / p2) + plot_layout(guides = 'collect')
+
+# Now fit the model
+m_h1_fit <- brm(prosoc_z ~ ritual_z, data = d_summary_pid, family = skew_normal(), prior = priors, chains = 4, cores = 4, iter = 1e4)
+post <- as_draws_df(m_h1_fit)
+
+# Posterior predictive checks
+p1 <- pp_check(m_h1_fit, ndraws = 100) + ggtitle("Posterior predictive checks")
+p2 <- pp_check(m_h1_fit, ndraws = 100, type = "ecdf_overlay")
+p3 <- pp_check(m_h1_fit, ndraws = 100, type = "loo_pit_overlay")
+
+(p1 / p2 / p3) + plot_layout(guides = 'collect')
+
+# Assess hypothesis
+pd_h1 <- round(mean(post$b_ritual_z > 0), 4)
+
+p_h1_1 <- d_summary_pid %>%
+  data_grid(ritual_z = seq_range(ritual_z, n = 200)) %>%
+  add_epred_draws(m_h1_fit, ndraws = 200) %>%   # sample 100 means from the posterior
+  ggplot(aes(x = ritual_z, y = prosoc_z)) +
+  geom_line(aes(y = .epred, group = .draw), alpha = 1/20, color = "#5e22c7") +
+  geom_point(data = d_summary_pid, color = "#5e22c7", alpha = 0.4) +
+  theme_classic(base_size = 15) +
+  xlab("Ritual participation (z-score)") + 
+  ylab("Prosociality (z-score)")
+
+p_h1_2 <- ggplot(post, aes(x = b_ritual_z)) +
+  geom_density(fill = "#5e22c7", color = NA, alpha = 0.5) +
+  theme_classic(base_size = 15) + 
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  xlab(expression(beta[ritual %->% prosoc])) + 
+  annotation_custom(
+    grob = textGrob( bquote("PP(" ~ beta ~ "> 0" ~ ")" ~ "≈" ~ .(pd_h1)), x = unit(0.8, "native"), y = unit(0.96, "npc"))
+  )
+
+p_h1_1 + p_h1_2
+
+```
+
+
+### Hypothesis 2: Participation in mourning rituals improves community wellbeing (Subjective wellbeing scale)
+
+H2a: If the effect of ritual on prosociality is mediated by wellbeing, then participation in a traditional Luhya mourning ritual will lead to higher wellbeing scores which, in turn, will lead to a higher prosociality score.
+
+```{r, warning = F, message = F}
+# First, prior predictive checks
+priors <- prior(normal(0, 0.5), class = "Intercept", resp = "prosocz") +
+   prior(normal(0, 0.5), class = "b", resp = "prosocz") + 
+   prior(normal(0, 1), class = "sigma", resp = "prosocz") + 
+   prior(normal(0, 2), class = "alpha", resp = "prosocz") +
+   prior(normal(0, 0.5), class = "Intercept", resp = "SWBz") +
+   prior(normal(0, 0.5), class = "b", resp = "SWBz") + 
+   prior(normal(0, 1), class = "sigma", resp = "SWBz") + 
+   prior(normal(0, 2), class = "alpha", resp = "SWBz")
+
+# Define each response model
+f1 <- bf(SWB_z ~ ritual_z) + skew_normal()
+f2 <- bf(prosoc_z ~ SWB_z + ritual_z) + skew_normal()
+
+m_h2_prior <- brm(f1 + f2 + set_rescor(FALSE), data = d_summary_pid, prior = priors, chains = 1, iter = 1000, sample_prior = "only")
+
+set.seed(123)
+color_scheme_set("red")
+p1_A <- pp_check(m_h2_prior, resp = "prosocz", ndraws = 100) + ggtitle("Prior predictive checks", subtitle = "prosoc_z")
+p1_B <- pp_check(m_h2_prior, resp = "SWBz", ndraws = 100) + ggtitle("", subtitle = "SWB_z")
+p2_A <- pp_check(m_h2_prior, resp = "prosocz", ndraws = 100, type = "ecdf_overlay") + ggtitle("", subtitle = "prosoc_z")
+p2_B <- pp_check(m_h2_prior, resp = "SWBz", ndraws = 100, type = "ecdf_overlay") + ggtitle("", subtitle = "SWB_z")
+
+((p1_A + p1_B) / (p2_A + p2_B)) + plot_layout(guides = 'collect')
+
+# Now fit the model
+m_h2_fit <- brm(f1 + f2 + set_rescor(FALSE), data = d_summary_pid, prior = priors, chains = 4, cores = 4, iter = 1e4)
+post <- as_draws_df(m_h2_fit)
+
+# Posterior predictive checks
+p1_A <- pp_check(m_h2_fit, resp = "prosocz", ndraws = 100) + ggtitle("Prior predictive checks", subtitle = "prosoc_z")
+p1_B <- pp_check(m_h2_fit, resp = "SWBz", ndraws = 100) + ggtitle("", subtitle = "SWB_z")
+p2_A <- pp_check(m_h2_fit, resp = "prosocz", ndraws = 100, type = "ecdf_overlay") + ggtitle("", subtitle = "prosoc_z")
+p2_B <- pp_check(m_h2_fit, resp = "SWBz", ndraws = 100, type = "ecdf_overlay") + ggtitle("", subtitle = "SWB_z")
+p3_A <- pp_check(m_h2_fit, resp = "prosocz", ndraws = 100, type = "loo_pit_overlay") + ggtitle("", subtitle = "prosoc_z")
+p3_B <- pp_check(m_h2_fit, resp = "SWBz", ndraws = 100, type = "loo_pit_overlay") + ggtitle("", subtitle = "SWB_z")
+
+((p1_A + p1_B) / (p2_A + p2_B) / (p3_A + p3_B) + plot_layout(guides = 'collect')) + plot_layout(guides = 'collect')
+
+# Assess hypothesis
+mediation(m_h2_fit)
+
+pd_h2_A <- round(mean(post$b_SWBz_ritual_z > 0), 4)
+pd_h2_B <- round(mean(post$b_prosocz_SWB_z > 0), 4)
+
+p_h2_1 <- d_summary_pid %>%
+  data_grid(ritual_z = seq_range(ritual_z, n = 200)) %>%
+  add_epred_draws(m_h2_fit, resp = "SWBz",  ndraws = 200) %>%   # sample 100 means from the posterior
+  ggplot(aes(x = ritual_z, y = .epred)) +
+  geom_line(aes(y = .epred, group = .draw), alpha = 1/20, color = "#22a3c7") +
+  geom_point(data = d_summary_pid, aes(x = ritual_z, y = SWB_z), color = "#22a3c7", alpha = 0.4) +
+  theme_classic(base_size = 15) +
+  xlab("Ritual participation (z-score)") + 
+  ylab("Subjective wellbeing (z-score)")
+
+p_h2_2 <- ggplot(post, aes(x = post$b_SWBz_ritual_z)) +
+  geom_density(fill = "#22a3c7", color = NA, alpha = 0.5) +
+  theme_classic(base_size = 15) + 
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  xlab(expression(beta[ritual %->% SWB])) + 
+  annotation_custom(
+    grob = textGrob( bquote("PP(" ~ beta ~ "> 0" ~ ")" ~ "≈" ~ .(pd_h2_A)), x = unit(0.8, "native"), y = unit(0.96, "npc"))
+  )
+
+p_h2_3 <- d_summary_pid %>%
+  data_grid(ritual_z = 0, SWB_z = seq_range(SWB_z, n = 200)) %>%
+  add_epred_draws(m_h2_fit, resp = "prosocz",  ndraws = 200) %>%   # sample 100 means from the posterior
+  ggplot(aes(x = SWB_z, y = .epred)) +
+  geom_line(aes(y = .epred, group = .draw), alpha = 1/20, color = "#5e22c7") +
+  theme_classic(base_size = 15) +
+  ylab("Prosociality (z-score)") + 
+  xlab("Subjective wellbeing (z-score)") + 
+  ggtitle("", subtitle = "adjusted for ritual_z")
+
+p_h2_4 <- ggplot(post, aes(x = b_prosocz_SWB_z)) +
+  geom_density(fill = "#5e22c7", color = NA, alpha = 0.5) +
+  theme_classic(base_size = 15) + 
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  xlab(expression(beta[SWB %->% prosoc ~ "|" ~ ritual])) +
+  annotation_custom(
+    grob = textGrob( bquote("PP(" ~ beta ~ "> 0" ~ ")" ~ "≈" ~ .(pd_h2_B)), x = unit(0.3, "native"), y = unit(0.96, "npc"))
+  )
+
+(p_h2_1 + p_h2_2)
+(p_h2_3 + p_h2_4)
+```
+
+
