@@ -1,0 +1,65 @@
+---
+title: "Results Report"
+format: pdf
+editor: visual
+---
+
+```{r, echo = F, message = F, warning = F}
+library(targets)
+tar_load_globals()
+tar_load(names = c(cronbach, m_h2_double))
+```
+
+## Descriptive Plots
+
+### Mourning rituals
+![Ritual participation: item-specific frequency of responses](figures/rituals_descriptive_bars.png)
+
+![Ritual participation: item-specific mean response](figures/rituals_descriptive_mean.png)
+
+![Ritual participation: correlations between sub-scales](figures/rituals_descriptive_pairs.png)
+
+
+### Prosociality
+![Prosociality: item-specific frequency of responses](figures/prosoc_descriptive_bars.png)
+
+![Prosociality: item-specific mean response](figures/prosoc_descriptive_mean.png)
+
+![Prosociality: correlations between sub-scales](figures/prosoc_descriptive_pairs.png)
+
+
+### Subjective wellbeing
+![Subjective wellbeing: item-specific frequency of responses](figures/SWB_descriptive_bars.png)
+
+![Subjective wellbeing: item-specific mean response](figures/SWB_descriptive_mean.png)
+
+![Subjective wellbeing: correlations between sub-scales](figures/SWB_descriptive_pairs.png)
+
+## Reliability of Instruments
+
+```{r, echo = F, message = F, warning = F}
+cronbach %>% select(-c(mean, sd, ase))
+```
+
+## Model definitions
+
+```{r, echo = F, message = F, warning = F}
+# IPTW + regression adjustment for maximal example, other models are nested within this one
+
+# brms formula
+m_h2_double$formula
+
+m_h2_double$family
+
+# priors
+m_h2_double$prior %>% as_data_frame() %>% select(-c(group, dpar, nlpar, lb, ub, source)) %>% dplyr::filter(prior != "")
+```
+
+## Model Results
+
+![Model results](figures/avg_marginal.png)
+
+## Model Checking
+
+![Posterior predictive checks from "double robust" model with both IPTW and regression adjustment.](figures/model_checks.png)
+
